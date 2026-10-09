@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+  body { 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: #1e293b; background-color: #ffffff; -webkit-font-smoothing: antialiased;
+  }
+
+  p {
+    font-size: 14px; font-weight: 600; color: #475569; margin-bottom: 12px;
+  }
+
+  /* Email type */
+  .controls { 
+    margin-bottom: 24px; background: #f8fafc; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; align-items: center; gap: 12px;
+  }
+
+  .controls label {
+    font-size: 14px; font-weight: 600; color: #334155;
+  }
+
+  .controls select {
+    padding: 8px 12px; font-size: 14px; border-radius: 8px; border: 1px solid #cbd5e1; background-color: #ffffff; color: #0f172a; outline: none; cursor: pointer; transition: all 0.2s ease; min-width: 260px;
+  }
+
+  .controls select:focus {
+    border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  }
+
+  /* Element list converter */
+  #elementsList {
+    max-height: 280px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 12px; padding: 4px; background: #ffffff;
+  }
+
+  .session-row { 
+    padding: 12px 16px; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center; transition: background-color 0.15s ease; border-radius: 8px; margin-bottom: 2px;
+  }
+
+  .session-row:last-child {
+    border-bottom: none;margin-bottom: 0;
+  }
+
+  .session-row:hover { 
+    background-color: #f1f5f9; 
+  }
+
+  .session-row input[type="checkbox"] { 
+    margin-right: 14px; width: 18px; height: 18px; cursor: pointer; accent-color: #2563eb;
+  }
+
+  .session-row label {
+    cursor: pointer; font-size: 14px; line-height: 1.4; color: #334155; user-select: none; width: 100%;
+  }
+
+  .presenter-info { 
+    font-weight: 600; color: #1e40af; font-size: 14px;
+  }
+
+  .session-name { 
+    color: #64748b; 
+    margin-left: 4px;
+  }
+
+  .select-all-row { 
+    background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; font-weight: 600; margin-bottom: 12px; display: none; padding: 14px 16px;
+  }
+  
+  .select-all-row:hover {
+    background-color: #f1f5f9;
+  }
+  
+  .select-all-row .presenter-info {
+    color: #334155;
+  }
+
+  .actions { 
+    margin-top: 28px; text-align: right; display: flex; justify-content: flex-end; gap: 12px;
+  }
+
+  button { 
+    padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px;transition: all 0.2s ease;
+  }
+
+  .btn-primary { 
+    background-color: #2563eb; color: #ffffff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background-color: #1d4ed8;
+  }
+
+  .btn-primary:disabled { 
+    background-color: #cbd5e1 !important; color: #94a3b8 !important; cursor: not-allowed;box-shadow: none;
+  }
+
+  .btn-secondary { 
+    background-color: #ffffff; color: #475569; border: 1px solid #cbd5e1;
+  }
+
+  .btn-secondary:hover {
+    background-color: #f8fafc;color: #1e293b;border-color: #94a3b8;
+  }
+</style>
+  </head>
+  <body>
+
+    <div class="controls">
+      <label for="flowSelect"><strong>Email type:</strong></label>
+      <select id="flowSelect" onchange="handleFlowChange()" style="padding: 5px;">
+        <option value="" disabled selected>-- SELECT EMAIL TYPE --</option>
+        <option value="invitation">Invite presenters (PLACEHOLDER)</option>
+        <option value="confirmation">Confirm Sessions' dates and times</option>
+        <option value="placeholder">Send Calendar Placeholder (Outlook Direct)</option>
+        <option value="vp_selection">VPs participant selections</option>
+        <option value="vp_reminder">VPs participant selections (REMINDER)</option>
+      </select>
+    </div>
+
+    <div id="selectAllBlock" class="session-row select-all-row">
+      <input type="checkbox" id="selectAllChk" onchange="toggleSelectAll(this)">
+      <label for="selectAllChk" style="cursor:pointer; width: 100%;">Select All</label>
+    </div>
+
+    <div id="elementsList">
+      <p id="placeholderText" style="color: #64748b; font-weight: normal; font-style: italic; padding: 12px 16px; margin: 0;">
+        Please select an email type above to load the recipient list.
+      </p>
+    </div>
+
+    <div class="actions">
+      <button class="btn-secondary" onclick="google.script.host.close()">Cancel</button>
+      <button class="btn-primary" id="sendBtn" onclick="sendEmails()" disabled>Send selected items</button>
+    </div>
+
+    <script>
+      var globalSessionsData = [];
+
+      function handleFlowChange() {
+        const flowSelect = document.getElementById('flowSelect');
+        const listDiv = document.getElementById('elementsList');
+        const selectAllBlock = document.getElementById('selectAllBlock');
+        
+        selectAllBlock.style.display = 'none';
+        document.getElementById('selectAllChk').checked = false;
+        document.getElementById('sendBtn').disabled = true;
+
+        if (flowSelect.value === "") {
+          listDiv.innerHTML = `<p id="placeholderText" style="color: #64748b; font-weight: normal; font-style: italic; padding: 12px 16px; margin: 0;">Please select an email type above to load the recipient list.</p>`;
+          return;
+        }
+        
+        listDiv.innerHTML = `<div id="loading" style="color: #2563eb; font-weight: 500; font-size: 14px; padding: 12px 16px;">Loading data from a spreadsheet...</div>`;
+
+        if (flowSelect.value === "vp_selection") {
+          google.script.run.withSuccessHandler(displayVps).getVpSelectionData();
+        } 
+        else if (flowSelect.value === "vp_reminder") {
+          google.script.run.withSuccessHandler(displayVps).getVpReminderData();
+        }
+        else if (flowSelect.value === "placeholder") {
+          google.script.run.withSuccessHandler(displaySessions).getGroupedPlaceholderData();
+        }
+        else {
+          google.script.run.withSuccessHandler(displaySessions).getGroupedSessionsData();
+        }
+      }
+
+      function displaySessions(data) {
+        const listDiv = document.getElementById('elementsList');
+        listDiv.innerHTML = "";
+        globalSessionsData = data;
+
+        if(data.length === 0) {
+          listDiv.innerHTML = "<p style='color:#d93025; padding: 12px 16px; margin: 0;'>No sessions to process. All emails have been sent or sheet is empty.</p>";
+          return;
+        }
+
+        document.getElementById('selectAllBlock').style.display = 'flex';
+
+        data.forEach((group, index) => {
+          const div = document.createElement('div');
+          div.className = 'session-row';
+          div.innerHTML = `
+            <input type="checkbox" id="chk_${index}" value="${index}" onchange="validateForm()">
+            <label for="chk_${index}" style="cursor:pointer;">
+              <span class="presenter-info">${group.presenter}</span> 
+              <span class="session-name">${group.rowsIndices.length} cohort(s): ${group.sessionName}</span>
+            </label>
+          `;
+          listDiv.appendChild(div);
+        });
+        validateForm();
+      }
+
+      function displayVps(data) {
+        const listDiv = document.getElementById('elementsList');
+        listDiv.innerHTML = "";
+        globalSessionsData = data;
+
+        if(data.length === 0) {
+          listDiv.innerHTML = "<p style='color:#d93025; padding: 12px 16px; margin: 0;'>No VPs to notify. All selection emails have been sent or sheet is empty.</p>";
+          return;
+        }
+
+        document.getElementById('selectAllBlock').style.display = 'flex';
+
+        data.forEach((vp, index) => {
+          const div = document.createElement('div');
+          div.className = 'session-row';
+          
+          var geos = [];
+          
+          function isValidGeo(val) {
+            if (!val || val === "-" || val === "0" || val === 0) return false;
+            return true;
+          }
+
+          if (isValidGeo(vp.amer)) geos.push(`Americas: ${vp.amer}`);
+          if (isValidGeo(vp.apj)) geos.push(`APJ: ${vp.apj}`);
+          if (isValidGeo(vp.emea)) geos.push(`EMEA: ${vp.emea}`);
+          
+          if (vp.hasWaiting && isValidGeo(vp.waitingSeats)) {
+            geos.push(`${vp.waitingSeats} waitlisted`);
+          }
+
+          var bracketContent = geos.join(", ");
+          var geoDetails = bracketContent ? ` (${bracketContent})` : '';
+
+          div.innerHTML = `
+            <input type="checkbox" id="chk_${index}" value="${index}" onchange="validateForm()">
+            <label for="chk_${index}" style="cursor:pointer;">
+              <span class="presenter-info">${vp.vpName}</span> 
+              <span class="session-name">${vp.org} | Allocated: ${vp.total} seats${geoDetails}</span>
+            </label>
+          `;
+          listDiv.appendChild(div);
+        });
+        validateForm();
+      }
+
+      function toggleSelectAll(master) {
+        globalSessionsData.forEach((group, index) => {
+          const chk = document.getElementById(`chk_${index}`);
+          if (chk) {
+            chk.checked = master.checked;
+          }
+        });
+        validateForm();
+      }
+
+      function validateForm() {
+        const flowSelect = document.getElementById('flowSelect');
+        const sendBtn = document.getElementById('sendBtn');
+        const masterChk = document.getElementById('selectAllChk');
+        
+        const isFlowSelected = flowSelect.value !== "";
+        let isAnyCheckboxChecked = false;
+        let totalCheckedCount = 0;
+        let totalVisibleCount = 0;
+        
+        globalSessionsData.forEach((group, index) => {
+          const chk = document.getElementById(`chk_${index}`);
+          if (chk) {
+            totalVisibleCount++;
+            if (chk.checked) {
+              isAnyCheckboxChecked = true;
+              totalCheckedCount++;
+            }
+          }
+        });
+
+        if (totalVisibleCount > 0 && totalCheckedCount === totalVisibleCount) {
+          masterChk.checked = true;
+        } else {
+          masterChk.checked = false;
+        }
+
+        if (isFlowSelected && isAnyCheckboxChecked) {
+          sendBtn.disabled = false;
+        } else {
+          sendBtn.disabled = true;
+        }
+      }
+
+      function sendEmails() {
+        document.getElementById('sendBtn').disabled = true;
+        document.getElementById('sendBtn').innerText = "Sending...";
+        
+        var selectedGroups = [];
+        var flowType = document.getElementById('flowSelect').value;
+        
+        globalSessionsData.forEach(function(group, index) {
+          var chk = document.getElementById('chk_' + index);
+          if (chk && chk.checked) {
+            selectedGroups.push(group);
+          }
+        });
+
+        if(selectedGroups.length === 0) {
+          alert("Select at least one item.");
+          validateForm();
+          document.getElementById('sendBtn').innerText = "Send selected items";
+          return;
+        }
+
+        google.script.run.withSuccessHandler(function(response) {
+          google.script.run.showNativeAlert(response);
+          google.script.host.close();
+        }).processSending(selectedGroups, flowType);
+      }
+    </script>
+  </body>
+</html>
