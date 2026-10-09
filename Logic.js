@@ -24,6 +24,10 @@ function processSending(selectedItems, flow) {
     case FLOW_TYPE.PLACEHOLDER:
       mailCount = processPlaceholderFlow(selectedItems, flow);
       break;
+
+    case FLOW_TYPE.CALENDAR_INVITE: // 
+      mailCount = processCalendarInviteFlow(selectedItems, flow);
+      break;
       
     default:
       throw new Error(`Unsupported flow type: ${flow}`);
@@ -272,6 +276,98 @@ function processPlaceholderFlow(selectedItems, flow) {
   return count;
 }
 
+
+// Prawdziwe zaproszenia z Webex i wylistowaniem kohorty
+function processCalendarInviteFlow(selectedItems, flow) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetConfig = FLOW_SHEETS[flow];
+  const presenterSheet = spreadsheet.getSheetByName(sheetConfig.name);
+  
+  if (!presenterSheet) throw new Error(`Sheet not found: ${sheetConfig.name}`);
+  
+  const data = presenterSheet.getDataRange().getValues();
+  const senderEmail = Session.getActiveUser().getEmail();
+  let count = 0;
+
+  selectedItems.forEach(group => {
+    const sessionRows = group.rowsIndices.map(rowIndex => data[rowIndex - 1]);
+    if (sessionRows.length === 0) return;
+
+    let mailMetadata = null;
+    let isSuccess = false;
+    let errorMessage = "";
+
+    try {
+      // Wywołuje funkcję z Emails.js
+      mailMetadata = executeCalendarInviteFlow(sessionRows);
+      isSuccess = true;
+    } catch (error) {
+      isSuccess = false;
+      errorMessage = error.toString();
+      mailMetadata = {
+        recipient: "Cohort Participants",
+        subject: `[FAILED INVITE] Session: ${sessionRows[0][COL.SESSION_NAME]}`,
+        cohorts: "Error"
+      };
+    }
+
+    appendEmailLog({
+      sender: senderEmail,
+      recipient: mailMetadata.recipient,
+      flowType: flow,
+      cohorts: mailMetadata.cohorts,
+      subject: mailMetadata.subject,
+      status: isSuccess,
+      notes: errorMessage
+    });
+
+    if (isSuccess) {
+      group.rowsIndices.forEach(rowIndex => {
+        // Zaznaczamy Checkbox "INVITE" w kolumnie R
+        presenterSheet.getRange(rowIndex, COL.INVITE_CHECKBOX + 1).setValue(MSG_SENT);
+      });
+      count++;
+    }
+  });
+
+  return count;
+}
+
+
+function getGroupedInviteData() {
+  const sheetConfig = FLOW_SHEETS[FLOW_TYPE.CALENDAR_INVITE];
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetConfig.name);
+  if (!sheet) return [];
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < sheetConfig.dataStartRow) return [];
+
+  const data = sheet.getRange(sheetConfig.dataStartRow, 1, lastRow - (sheetConfig.dataStartRow - 1), sheet.getLastColumn()).getValues();
+  const grouped = {};
+
+  data.forEach((row, index) => {
+    const isSent = row[COL.INVITE_CHECKBOX]; // Filtrujemy po kolumnie R (INVITE_CHECKBOX)
+    const sessionName = row[COL.SESSION_NAME];
+    const presenter = row[COL.PRESENTER];
+    const presenterEmail = row[COL.PRESENTER_EMAIL];
+
+    if (!sessionName || isSent === MSG_SENT) return;
+
+    const groupKey = `${presenter}|||${sessionName}`;
+
+    if (!grouped[groupKey]) {
+      grouped[groupKey] = {
+        presenter: presenter,
+        presenterEmail: presenterEmail,
+        sessionName: sessionName,
+        rowsIndices: []
+      };
+    }
+    grouped[groupKey].rowsIndices.push(index + sheetConfig.dataStartRow);
+  });
+
+  return Object.keys(grouped).map(key => grouped[key]);
+}
 
 // ================================
 // DEDICATED DATA FETCHERS (UI)
@@ -555,4 +651,346 @@ function convertTo24hICal(timeStr) {
   } catch(e) {
     return "120000";
   }
+}
+
+
+// FLOW: OUTLOOK CALENDAR INVITE (PRAWDZIWE ZAPROSZENIE Z WEBEXEM I LOGO)
+function executeCalendarInviteFlow(sessionRows, cohortEmails) {
+  const fullPresenterName = sessionRows[0][COL.PRESENTER];
+  const presenterEmail = sessionRows[0][COL.PRESENTER_EMAIL];
+  const sessionName = sessionRows[0][COL.SESSION_NAME];
+  const sessionNo = sessionRows[0][COL.NO];
+  const webexLink = sessionRows[0][COL.WEBEX_LINK]; // Pobieramy link do Webex z kolumny L
+
+  const activeUserEmail = Session.getActiveUser().getEmail(); 
+  const iCalOrganizerEmail = IS_TEST_MODE ? "ngtl-system@akamai.com" : ngtlemail;
+
+  // Główny tytuł do logowania
+  const subject = `NGTL ${sessionNo}: ${sessionName}`;
+
+  // Pobranie logo jako Blob
+  const logoUrl = "https://akamai-university.akamaized.net/NGTL_logo.png";
+  let logoBlob;
+  try {
+    logoBlob = UrlFetchApp.fetch(logoUrl).getBlob().setName("logo.png");
+  } catch(e) {
+    // W razie gdyby akamai padło, wrzucamy pusty blob by skrypt się nie wywalił
+    logoBlob = Utilities.newBlob(" ", "image/png", "logo.png");
+  }
+
+  const cohortNames = [];
+  let eventsIcs = "";
+
+  sessionRows.forEach(row => {
+    const cohortName = row[COL.COHORT];
+    if (!cohortNames.includes(cohortName)) cohortNames.push(cohortName);
+
+    const sessionDateRaw = row[COL.SESSION_DATE]; 
+    const presenterTimeStr = row[COL.PRESENTER_TIME]; 
+    const durationMinutes = parseInt(row[COL.DURATION], 10);
+    
+    let rawTimezone = row[COL.PRESENTER_TIMEZONE] || "UTC";
+    
+    let iCalTimezone = "America/New_York"; 
+    if (rawTimezone.includes("PT")) iCalTimezone = "America/Los_Angeles";
+    if (rawTimezone.includes("CET")) iCalTimezone = "Europe/Warsaw";
+    if (rawTimezone.includes("GMT")) iCalTimezone = "Europe/London";
+
+    const cleanTimeMatch = presenterTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    let parsedStartDate = new Date(sessionDateRaw);
+    
+    if (cleanTimeMatch) {
+      let hours = parseInt(cleanTimeMatch[1], 10);
+      const minutes = parseInt(cleanTimeMatch[2], 10);
+      const ampm = cleanTimeMatch[3].toUpperCase();
+
+      if (ampm === "PM" && hours < 12) hours += 12;
+      if (ampm === "AM" && hours === 12) hours = 0;
+
+      parsedStartDate.setHours(hours, minutes, 0, 0);
+    }
+
+    let parsedEndDate = new Date(parsedStartDate.getTime() + durationMinutes * 60000);
+
+    const iCalStartStr = Utilities.formatDate(parsedStartDate, Session.getScriptTimeZone(), "yyyyMMdd'T'HHmmss");
+    const iCalEndStr = Utilities.formatDate(parsedEndDate, Session.getScriptTimeZone(), "yyyyMMdd'T'HHmmss");
+
+    const formattedDateText = Utilities.formatDate(parsedStartDate, Session.getScriptTimeZone(), "E, MMM d, yyyy");
+
+    // Zgodnie z wytycznymi - tytuł taki sam jak placeholder, tylko bez [PLACEHOLDER]
+    const iterationSubject = `NGTL ${sessionNo}: ${sessionName} (${cohortName})`;
+
+    // ICS będzie zawierał tych samych gości
+    // Dodajemy Webex do lokalizacji
+    eventsIcs = 
+      "BEGIN:VCALENDAR\r\n" +
+      "VERSION:2.0\r\n" +
+      "PRODID:-//Google Inc//Google Apps Script//EN\r\n" +
+      "METHOD:REQUEST\r\n" + 
+      "BEGIN:VEVENT\r\n" +
+      "UID:NGTL-" + Utilities.getUuid() + "\r\n" +
+      "ORGANIZER;CN=" + ngtlsenderName + ":MAILTO:" + iCalOrganizerEmail + "\r\n";
+      
+    // Doklejamy uczestników z kohorty do pliku ICS, aby się wyświetlali
+    if (IS_TEST_MODE) {
+      // W trybie testowym dodajemy adres testowy tylko jeden raz
+      eventsIcs += "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=" + mailPgM + ":MAILTO:" + mailPgM + "\r\n";
+    } else {
+      // W trybie produkcyjnym dodajemy prawdziwych uczestników po kolei
+      cohortEmails.forEach(email => {
+        let participantEmail = email.trim();
+        eventsIcs += "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=" + participantEmail + ":MAILTO:" + participantEmail + "\r\n";
+      });
+    }
+
+    eventsIcs +=
+      "DTSTART;TZID=" + iCalTimezone + ":" + iCalStartStr + "\r\n" + 
+      "DTEND;TZID=" + iCalTimezone + ":" + iCalEndStr + "\r\n" +
+      "SUMMARY:" + iterationSubject + "\r\n" +
+      "LOCATION:" + webexLink + "\r\n" +
+      "DESCRIPTION:You're invited to an NGTL session:\\n\\n" + sessionName + " – presented by " + fullPresenterName + "\\n\\nWebex Link: " + webexLink + "\\r\n" +
+      "SEQUENCE:0\r\n" +
+      "STATUS:CONFIRMED\r\n" +
+      "TRANSP:OPAQUE\r\n" + 
+      "END:VEVENT\r\n" +
+      "END:VCALENDAR";
+
+    // Budujemy dedykowaną treść HTML zgodnie z wytycznymi
+    const htmlBody = `
+      <html>
+        <body style="line-height: 1.5; padding: 0 20px; font-family: Arial, sans-serif; color: #333;">
+          <p>You're invited to an NGTL session:</p>
+          <p><strong>${sessionName}</strong> – presented by <strong>${fullPresenterName}</strong></p>
+          <img src="cid:ngtlLogo" alt="NGTL Logo" style="max-width: 200px; margin-bottom: 20px;" />
+        </body>
+      </html>
+    `;
+
+    // Wysyłanie e-maila
+    // Używam MailApp zamiast mailSenderAppWithCalendar, aby móc dodać inlineImages
+    const recipientList = IS_TEST_MODE ? TEST_EMAIL : cohortEmails.join(',');
+    const ccrecipients = `${ngtlemail}, ${mailArchitect}, ${mailPgM}`;
+    const ccList = IS_TEST_MODE ? TEST_CC_EMAIL : ccrecipients;
+    const finalSubject = IS_TEST_MODE ? `[TEST CALENDAR] ${iterationSubject}` : iterationSubject;
+
+    const icsAttachment = Utilities.newBlob(eventsIcs, 'text/calendar; method=REQUEST; charset=UTF-8', 'invite.ics');
+
+    MailApp.sendEmail({
+      name: ngtlsenderName,
+      replyTo: ngtlemail,
+      to: recipientList,
+      cc: ccList,
+      subject: finalSubject,
+      htmlBody: htmlBody,
+      inlineImages: {
+        ngtlLogo: logoBlob
+      },
+      attachments: [icsAttachment]
+    });
+  });
+
+  return {
+    recipient: "Cohort Participants", // Lub możesz wstawić `cohortEmails.join(", ")`
+    subject: subject,
+    cohorts: cohortNames.join(", ")
+  };
+}
+
+
+
+// ================================
+// PARTICIPANTS DATA FETCHER
+// ================================
+
+/**
+ * Funkcja pomocnicza: Pobiera uczestników z zakładki "Participants" 
+ * i grupuje ich w kohorty (Americas, APJ, EMEA).
+ */
+function getCohortEmailsMap_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Participants");
+  if (!sheet) return {};
+  
+  const data = sheet.getDataRange().getValues();
+  const map = {};
+
+  // Zakładamy, że wiersz 0 to nagłówki, więc zaczynamy od i = 1
+  for (let i = 1; i < data.length; i++) {
+    const status = String(data[i][1]).toLowerCase().trim(); // Kolumna B (indeks 1) - Status
+    const email = String(data[i][3]).trim();                // Kolumna D (indeks 3) - Email
+    let group = String(data[i][9]).trim();                  // Kolumna J (indeks 9) - Projekt/Grupa
+
+    // Bierzemy tylko "approved" i sprawdzamy, czy mail w ogóle istnieje
+    if (status !== "approved" || !email) continue;
+
+    // Przekształcamy "Americas 1" -> "Americas", rozbijając po spacji i biorąc pierwsze słowo
+    let cohort = group.split(" ")[0]; 
+
+    // Wyjątek: Ashwini Saket zawsze trafia do Americas
+    if (email.toLowerCase() === "asaket@akamai.com") {
+      cohort = "Americas";
+    }
+
+    if (!map[cohort]) {
+      map[cohort] = [];
+    }
+    map[cohort].push(email);
+  }
+  
+  return map;
+}
+
+// ================================
+// FLOW: OUTLOOK CALENDAR INVITE
+// ================================
+
+function executeCalendarInviteFlow(sessionRows) {
+  const fullPresenterName = sessionRows[0][COL.PRESENTER];
+  const sessionName = sessionRows[0][COL.SESSION_NAME];
+  const sessionNo = sessionRows[0][COL.NO];
+  const webexLink = sessionRows[0][COL.WEBEX_LINK]; // Link do Webex z kolumny L
+
+  const activeUserEmail = Session.getActiveUser().getEmail(); 
+  const iCalOrganizerEmail = IS_TEST_MODE ? "ngtl-system@akamai.com" : ngtlemail;
+
+  // Główny tytuł do logowania
+  const subject = `NGTL ${sessionNo}: ${sessionName}`;
+
+  // Pobranie logo jako Blob
+  const logoUrl = "https://akamai-university.akamaized.net/NGTL_logo.png";
+  let logoBlob;
+  try {
+    logoBlob = UrlFetchApp.fetch(logoUrl).getBlob().setName("logo.png");
+  } catch(e) {
+    // Awaryjnie, gdyby serwer akamai nie odpowiedział
+    logoBlob = Utilities.newBlob(" ", "image/png", "logo.png");
+  }
+
+  const cohortNames = [];
+  let eventsIcs = "";
+
+  // 1. Pobranie zgrupowanych maili (tylko approved)
+  const cohortEmailsMap = getCohortEmailsMap_();
+
+  sessionRows.forEach(row => {
+    const cohortName = row[COL.COHORT];
+    if (!cohortNames.includes(cohortName)) cohortNames.push(cohortName);
+
+    // 2. Wyciągamy maile dla akurat procesowanej kohorty (np. "Americas")
+    const cohortEmails = cohortEmailsMap[cohortName] || [];
+
+    const sessionDateRaw = row[COL.SESSION_DATE]; 
+    const presenterTimeStr = row[COL.PRESENTER_TIME]; 
+    const durationMinutes = parseInt(row[COL.DURATION], 10);
+    
+    let rawTimezone = row[COL.PRESENTER_TIMEZONE] || "UTC";
+    
+    let iCalTimezone = "America/New_York"; 
+    if (rawTimezone.includes("PT")) iCalTimezone = "America/Los_Angeles";
+    if (rawTimezone.includes("CET")) iCalTimezone = "Europe/Warsaw";
+    if (rawTimezone.includes("GMT")) iCalTimezone = "Europe/London";
+
+    const cleanTimeMatch = presenterTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    let parsedStartDate = new Date(sessionDateRaw);
+    
+    if (cleanTimeMatch) {
+      let hours = parseInt(cleanTimeMatch[1], 10);
+      const minutes = parseInt(cleanTimeMatch[2], 10);
+      const ampm = cleanTimeMatch[3].toUpperCase();
+
+      if (ampm === "PM" && hours < 12) hours += 12;
+      if (ampm === "AM" && hours === 12) hours = 0;
+
+      parsedStartDate.setHours(hours, minutes, 0, 0);
+    }
+
+    let parsedEndDate = new Date(parsedStartDate.getTime() + durationMinutes * 60000);
+
+    const iCalStartStr = Utilities.formatDate(parsedStartDate, Session.getScriptTimeZone(), "yyyyMMdd'T'HHmmss");
+    const iCalEndStr = Utilities.formatDate(parsedEndDate, Session.getScriptTimeZone(), "yyyyMMdd'T'HHmmss");
+    const formattedDateText = Utilities.formatDate(parsedStartDate, Session.getScriptTimeZone(), "E, MMM d, yyyy");
+
+    // Tytuł zaproszenia i maila
+    const iterationSubject = `NGTL ${sessionNo}: ${sessionName} (${cohortName})`;
+
+    eventsIcs = 
+      "BEGIN:VCALENDAR\r\n" +
+      "VERSION:2.0\r\n" +
+      "PRODID:-//Google Inc//Google Apps Script//EN\r\n" +
+      "METHOD:REQUEST\r\n" + 
+      "BEGIN:VEVENT\r\n" +
+      "UID:NGTL-" + Utilities.getUuid() + "\r\n" +
+      "ORGANIZER;CN=" + ngtlsenderName + ":MAILTO:" + iCalOrganizerEmail + "\r\n";
+      
+    // Doklejamy uczestników z kohorty do pliku ICS, aby Outlook/Gmail zapisał ich na wydarzeniu
+    cohortEmails.forEach(email => {
+      let participantEmail = IS_TEST_MODE ? mailPgM : email.trim();
+      eventsIcs += "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=" + participantEmail + ":MAILTO:" + participantEmail + "\r\n";
+    });
+
+    eventsIcs +=
+      "DTSTART;TZID=" + iCalTimezone + ":" + iCalStartStr + "\r\n" + 
+      "DTEND;TZID=" + iCalTimezone + ":" + iCalEndStr + "\r\n" +
+      "SUMMARY:" + iterationSubject + "\r\n" +
+      "LOCATION:" + webexLink + "\r\n" +
+      "DESCRIPTION:You're invited to an NGTL session:\\n\\n" + sessionName + " – presented by " + fullPresenterName + "\\n\\nWebex Link: " + webexLink + "\\r\n" +
+      "SEQUENCE:0\r\n" +
+      "STATUS:CONFIRMED\r\n" +
+      "TRANSP:OPAQUE\r\n" + 
+      "END:VEVENT\r\n" +
+      "END:VCALENDAR";
+
+    // 3. Dodanie banera testowego z listą maili nad treścią wiadomości, jeśli IS_TEST_MODE = true
+    let testModeBanner = "";
+    if (IS_TEST_MODE) {
+      testModeBanner = `
+        <div style="background-color: #fee; border: 1px solid #fcc; padding: 12px; margin-bottom: 20px; font-size: 12px; color: #b71c1c; border-radius: 4px;">
+          <strong>[TEST MODE] Zamiast do grupy docelowej, mail poszedł na adres testowy.</strong><br>
+          <span style="display:block; margin-top: 5px;">Oryginalni odbiorcy z kohorty <strong>${cohortName}</strong> (${cohortEmails.length} osób):</span>
+          <span style="font-family: monospace;">${cohortEmails.join(", ")}</span>
+        </div>`;
+    }
+
+    const htmlBody = `
+      <html>
+        <body style="line-height: 1.5; padding: 0 20px; font-family: Arial, sans-serif; color: #333;">
+          ${testModeBanner}
+          <p>You're invited to an NGTL session:</p>
+          <p><strong>${sessionName}</strong> – presented by <strong>${fullPresenterName}</strong></p>
+          <img src="cid:ngtlLogo" alt="NGTL Logo" style="max-width: 200px; margin-bottom: 20px;" />
+        </body>
+      </html>
+    `;
+
+    const ccrecipients = `${ngtlemail}, ${mailArchitect}, ${mailPgM}`;
+
+    // Ustalanie odbiorców
+    const recipientList = IS_TEST_MODE ? TEST_EMAIL : cohortEmails.join(',');
+    const ccList = IS_TEST_MODE ? TEST_CC_EMAIL : ccrecipients; 
+    const finalSubject = IS_TEST_MODE ? `[TEST CALENDAR] ${iterationSubject}` : iterationSubject;
+
+    const icsAttachment = Utilities.newBlob(eventsIcs, 'text/calendar; method=REQUEST; charset=UTF-8', 'invite.ics');
+
+    // Wysyłamy, tylko jeśli kohorta ma przynajmniej jednego zatwierdzonego uczestnika (lub test)
+    if (cohortEmails.length > 0 || IS_TEST_MODE) {
+      MailApp.sendEmail({
+        name: ngtlsenderName,
+        replyTo: ngtlemail,
+        to: recipientList,
+        cc: ccList,
+        subject: finalSubject,
+        htmlBody: htmlBody,
+        inlineImages: {
+          ngtlLogo: logoBlob
+        },
+        attachments: [icsAttachment]
+      });
+    }
+  });
+
+  // Zwracamy obiekt metadanych do logera (appendEmailLog)
+  return {
+    recipient: `Cohort(s): ${cohortNames.join(", ")}`, 
+    subject: subject,
+    cohorts: cohortNames.join(", ")
+  };
 }

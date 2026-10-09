@@ -114,6 +114,7 @@
         <option value="placeholder">Send Calendar Placeholder (Outlook Direct)</option>
         <option value="vp_selection">VPs participant selections</option>
         <option value="vp_reminder">VPs participant selections (REMINDER)</option>
+        <option value="calendar_invite">Send Calendar Invites to Participants</option>
       </select>
     </div>
 
@@ -160,6 +161,9 @@
         }
         else if (flowSelect.value === "placeholder") {
           google.script.run.withSuccessHandler(displaySessions).getGroupedPlaceholderData();
+        }
+        else if (flowSelect.value === "calendar_invite") {
+          google.script.run.withSuccessHandler(displaySessions).getGroupedInviteData();
         }
         else {
           google.script.run.withSuccessHandler(displaySessions).getGroupedSessionsData();

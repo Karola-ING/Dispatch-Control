@@ -23,7 +23,8 @@ const FLOW_TYPE = {
   CONFIRMATION: "confirmation",
   PLACEHOLDER: "placeholder",
   VP_SELECTION: "vp_selection",
-  VP_REMINDER: "vp_reminder"
+  VP_REMINDER: "vp_reminder",
+  CALENDAR_INVITE: "calendar_invite"
 };
 
 // Flow Sheets 
@@ -33,6 +34,7 @@ const FLOW_SHEETS = {
   [FLOW_TYPE.PLACEHOLDER]: { name: "Presenters", dataStartRow: 2 },
   [FLOW_TYPE.VP_SELECTION]: { name: "Leadership", dataStartRow: 2 },
   [FLOW_TYPE.VP_REMINDER]:  { name: "Leadership", dataStartRow: 2 },
+  [FLOW_TYPE.CALENDAR_INVITE]: { name: "Presenters", dataStartRow: 2 }
 };
 
 const LOG_SHEET_NAME = "Email LOG";
