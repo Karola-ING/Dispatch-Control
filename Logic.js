@@ -660,7 +660,6 @@ function executeCalendarInviteFlow(sessionRows, cohortEmails) {
   const presenterEmail = sessionRows[0][COL.PRESENTER_EMAIL];
   const sessionName = sessionRows[0][COL.SESSION_NAME];
   const sessionNo = sessionRows[0][COL.NO];
-  const webexLink = sessionRows[0][COL.WEBEX_LINK]; // Pobieramy link do Webex z kolumny L
 
   const activeUserEmail = Session.getActiveUser().getEmail(); 
   const iCalOrganizerEmail = IS_TEST_MODE ? "ngtl-system@akamai.com" : ngtlemail;
@@ -683,6 +682,7 @@ function executeCalendarInviteFlow(sessionRows, cohortEmails) {
 
   sessionRows.forEach(row => {
     const cohortName = row[COL.COHORT];
+    const webexLink = row[COL.WEBEX_LINK]; // Link do Webex z kolumny L – osobny dla każdej kohorty
     if (!cohortNames.includes(cohortName)) cohortNames.push(cohortName);
 
     const sessionDateRaw = row[COL.SESSION_DATE]; 
@@ -847,7 +847,6 @@ function executeCalendarInviteFlow(sessionRows) {
   const fullPresenterName = sessionRows[0][COL.PRESENTER];
   const sessionName = sessionRows[0][COL.SESSION_NAME];
   const sessionNo = sessionRows[0][COL.NO];
-  const webexLink = sessionRows[0][COL.WEBEX_LINK]; // Link do Webex z kolumny L
 
   const activeUserEmail = Session.getActiveUser().getEmail(); 
   const iCalOrganizerEmail = IS_TEST_MODE ? "ngtl-system@akamai.com" : ngtlemail;
@@ -873,6 +872,7 @@ function executeCalendarInviteFlow(sessionRows) {
 
   sessionRows.forEach(row => {
     const cohortName = row[COL.COHORT];
+    const webexLink = row[COL.WEBEX_LINK]; // Link do Webex z kolumny L – osobny dla każdej kohorty
     if (!cohortNames.includes(cohortName)) cohortNames.push(cohortName);
 
     // 2. Wyciągamy maile dla akurat procesowanej kohorty (np. "Americas")
